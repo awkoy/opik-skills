@@ -1,0 +1,147 @@
+name: Sync skills from opik-mcp
+
+# The skills are authored in comet-ml/opik-mcp and published there as a rolling
+# artifact. This job pulls that artifact and opens a pull request when it differs
+# from what this repository holds. A human merges it.
+#
+# It opens a pull request rather than pushing, deliberately. Nothing reaches the
+# public pack without someone seeing the diff — but nobody has to remember to look,
+# which is what let this repository fall two and a half months behind (OPIK-7621).
+#
+# It pulls rather than being pushed to, also deliberately: opik-mcp holds no
+# credentials for this repository, and the token below is scoped to this one.
+
+on:
+  # The schedule stays commented out until the first cutover has been run by hand
+  # and reviewed (OPIK-7621, ticket 07). Until then this workflow is inert: it can
+  # only be started deliberately from the Actions tab.
+  #
+  # Uncomment after the first sync has been merged.
+  #
+  # schedule:
+  #   # Daily. Skill content changes weekly at most, and at pull-request
+  #   # granularity a tighter schedule only produces noise.
+  #   - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write        # push the sync branch
+  pull-requests: write   # open / update the sync pull request
+
+concurrency:
+  group: sync-skills
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: comet-ml/opik-mcp
+  PACK_TAG: skills-pack
+  SYNC_BRANCH: sync/skills-pack
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the published manifest
+        id: manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The manifest is a separate asset precisely so the common
+          # "nothing changed" case costs a couple of kilobytes.
+          gh release download "$PACK_TAG" --repo "$SOURCE_REPO" \
+            --pattern index.json --output upstream-index.json --clobber
+
+          # Refuse a manifest shape this job was not written against, rather than
+          # silently misreading it.
+          SCHEMA=$(jq -r .schema_version upstream-index.json)
+          if [ "$SCHEMA" != "1" ]; then
+            echo "::error::upstream manifest is schema_version $SCHEMA; this job understands 1"
+            exit 1
+          fi
+
+          UPSTREAM=$(jq -r .content_digest upstream-index.json)
+          CURRENT=$(jq -r .content_digest index.json 2>/dev/null || echo "none")
+          echo "upstream=$UPSTREAM" | tee -a "$GITHUB_OUTPUT"
+          echo "current=$CURRENT"  | tee -a "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM" = "$CURRENT" ]; then
+            echo "changed=false" | tee -a "$GITHUB_OUTPUT"
+            echo "Pack is current ($CURRENT) — nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download and unpack
+        if: steps.manifest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$PACK_TAG" --repo "$SOURCE_REPO" \
+            --pattern opik-skills-pack.tar.gz --output pack.tar.gz --clobber
+          mkdir -p incoming
+          tar -xzf pack.tar.gz -C incoming
+
+          # Refuse an empty pack rather than deleting every skill. The producer
+          # already fails closed on this; a second check here costs nothing and
+          # guards against a truncated download.
+          if [ -z "$(ls -A incoming/skills 2>/dev/null || true)" ]; then
+            echo "::error::downloaded pack contains no skills — refusing to sync"
+            exit 1
+          fi
+
+      - name: Apply the pack
+        if: steps.manifest.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # Deletion is confined to skills/. LICENSE, .github/ and CONTRIBUTING.md
+          # are maintained by hand here and must survive any producer-side fault.
+          rsync -a --delete incoming/skills/ skills/
+          cp incoming/README.md README.md
+          cp incoming/index.json index.json
+          rm -rf incoming pack.tar.gz upstream-index.json
+
+      - name: Open or update the sync pull request
+        if: steps.manifest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: ${{ steps.manifest.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # A fixed branch means a week of unreviewed daily runs produces one
+          # pull request, not seven.
+          git checkout -B "$SYNC_BRANCH"
+          git add --all skills README.md index.json
+
+          if git diff --staged --quiet; then
+            echo "Manifest differed but the tree did not — nothing to push." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git commit -m "sync: skills pack from ${SOURCE_REPO} (${UPSTREAM:0:12})"
+          git push --force origin "$SYNC_BRANCH"
+
+          if ! gh pr view "$SYNC_BRANCH" --json number >/dev/null 2>&1; then
+            gh pr create \
+              --base main --head "$SYNC_BRANCH" \
+              --title "Sync skills pack from opik-mcp" \
+              --body "Generated by the scheduled sync. The skills in this repository are \
+          built from [\`${SOURCE_REPO}\`](https://github.com/${SOURCE_REPO}) under \
+          \`src/opik_mcp/skills/\` — review the diff and merge to publish.
+
+          Content digest: \`${UPSTREAM}\`
+
+          Do not hand-edit this branch; edit the skills upstream instead."
+          fi
+
+          echo "### Sync pull request updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "Content digest: \`${UPSTREAM}\`" >> "$GITHUB_STEP_SUMMARY"
