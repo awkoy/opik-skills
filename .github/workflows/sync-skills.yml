@@ -93,32 +93,7 @@ jobs:
           # would stay broken indefinitely. Verify the tree against the per-file
           # checksums in the manifest — that is what they are for — and repair if it
           # has drifted.
-          if python3 - <<'PY'
-          import hashlib, json, pathlib, sys
-
-          manifest = json.load(open("index.json"))
-          expected = {
-              f"{s['name']}/{f['path']}": f["sha256"]
-              for s in manifest.get("skills", [])
-              for f in s.get("files", [])
-          }
-          root = pathlib.Path("skills")
-          present = {
-              str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()
-          } if root.is_dir() else set()
-
-          drift = sorted((present - set(expected)) | (set(expected) - present))
-          for path, digest in expected.items():
-              target = root / path
-              if target.is_file():
-                  if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-                      drift.append(path)
-
-          for path in sorted(set(drift))[:20]:
-              print(f"drifted: {path}", file=sys.stderr)
-          sys.exit(1 if drift else 0)
-          PY
-          then
+          if python3 .github/scripts/verify_pack.py index.json skills; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Pack is current ($CURRENT) — nothing to do." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -128,10 +103,11 @@ jobs:
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Download and unpack
+      - name: Download and verify the pack
         if: steps.manifest.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: ${{ steps.manifest.outputs.upstream }}
         run: |
           set -euo pipefail
           gh release download "$PACK_TAG" --repo "$SOURCE_REPO" \
@@ -139,11 +115,20 @@ jobs:
           mkdir -p incoming
           tar -xzf pack.tar.gz -C incoming
 
-          # Refuse an empty pack rather than deleting every skill. The producer
-          # already fails closed on this; a second check here costs nothing and
-          # guards against a truncated download.
-          if [ -z "$(ls -A incoming/skills 2>/dev/null || true)" ]; then
-            echo "::error::downloaded pack contains no skills — refusing to sync"
+          # The release tag is rolling: its assets are overwritten by every upstream
+          # build, so the manifest and the tarball are two downloads that can come
+          # from two different builds. Tie them together before anything is staged.
+          INCOMING=$(jq -r '.content_digest // ""' incoming/index.json)
+          if [ "$INCOMING" != "$UPSTREAM" ]; then
+            echo "::error::tarball manifest ($INCOMING) is not the one authorised ($UPSTREAM)"
+            exit 1
+          fi
+
+          # And confirm the archive actually contains what that manifest promises.
+          # A truncated or partial pack is non-empty, so a bare emptiness check would
+          # let `rsync --delete` remove released skills.
+          if ! python3 .github/scripts/verify_pack.py incoming/index.json incoming/skills; then
+            echo "::error::downloaded pack does not match its manifest — refusing to sync"
             exit 1
           fi
 

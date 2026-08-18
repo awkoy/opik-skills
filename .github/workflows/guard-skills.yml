@@ -10,8 +10,15 @@ name: Guard synced skills
 # genuine improvements to skill text, and those should be redirected, not blocked
 # by a red check with no explanation.
 
+# `pull_request_target`, not `pull_request`: a fork-originated `pull_request` run gets
+# a read-only token, so `gh pr review` fails and the outside contributor — the one who
+# most needs the redirect — gets a failed check and no explanation.
+#
+# The usual danger of `pull_request_target` is running untrusted code with a writable
+# token. This job never checks the pull request out, never runs anything from it, and
+# only reads fields off the event payload, so there is nothing from the fork to execute.
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - 'skills/**'
       - 'README.md'
