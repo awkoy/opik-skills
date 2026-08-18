@@ -1,0 +1,81 @@
+name: Guard synced skills
+
+# The skill content here is generated from comet-ml/opik-mcp. A pull request
+# against it would be reverted by the next sync, so this tells the author before
+# they invest more, and points them at the place the change belongs.
+#
+# It requests changes rather than failing a required check. The real guarantee
+# against hand-edited content is the sync itself, which replaces the tree on its
+# next run; this workflow's job is communication. External contributors do open
+# genuine improvements to skill text, and those should be redirected, not blocked
+# by a red check with no explanation.
+
+# `pull_request_target`, not `pull_request`: a fork-originated `pull_request` run gets
+# a read-only token, so `gh pr review` fails and the outside contributor — the one who
+# most needs the redirect — gets a failed check and no explanation.
+#
+# The usual danger of `pull_request_target` is running untrusted code with a writable
+# token. This job never checks the pull request out, never runs anything from it, and
+# only reads fields off the event payload, so there is nothing from the fork to execute.
+on:
+  pull_request_target:
+    paths:
+      - 'skills/**'
+      - 'README.md'
+      - 'index.json'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  advise:
+    # The sync's own pull request must not be blocked by the guard. (Pull requests
+    # opened with the default token do not trigger workflows, so this rarely fires
+    # — but a human pushing to the sync branch would otherwise trip it.)
+    #
+    # The branch name alone is not enough to identify it: a fork can name its branch
+    # `sync/skills-pack` too, and would then skip the advisory it most needs. So the
+    # exemption also requires the branch to live in this repository.
+    if: >-
+      github.event.pull_request.head.repo.full_name != github.repository
+      || github.head_ref != 'sync/skills-pack'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build the review body
+        id: message
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author = context.payload.pull_request.user.login;
+            const isBot = context.payload.pull_request.user.type === 'Bot';
+            if (isBot) {
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            const { data: membership } = await github.rest.orgs
+              .getMembershipForUser({ org: context.repo.owner, username: author })
+              .catch(() => ({ data: null }));
+            const isInternal = membership?.state === 'active';
+
+            const action = isInternal
+              ? 'Please move this change to `src/opik_mcp/skills/` in [comet-ml/opik-mcp](https://github.com/comet-ml/opik-mcp) — it will reach this repository automatically once merged.'
+              : 'Thanks for the contribution — it needs to be applied upstream. Please open it against [comet-ml/opik-mcp](https://github.com/comet-ml/opik-mcp) under `src/opik_mcp/skills/`, and tag the Opik team there.';
+
+            core.setOutput('skip', 'false');
+            core.setOutput('body', [
+              'This repository is **generated**. Its skills, README and manifest are built from',
+              '[`comet-ml/opik-mcp`](https://github.com/comet-ml/opik-mcp) and synchronised here',
+              'automatically — any change made directly in this repository is overwritten by the',
+              'next sync.',
+              '',
+              action,
+            ].join('\n'));
+
+      - name: Request changes
+        if: steps.message.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BODY: ${{ steps.message.outputs.body }}
+        run: gh pr review "$PR_URL" --request-changes --body "$BODY"
