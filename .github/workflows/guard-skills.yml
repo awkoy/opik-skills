@@ -25,7 +25,13 @@ jobs:
     # The sync's own pull request must not be blocked by the guard. (Pull requests
     # opened with the default token do not trigger workflows, so this rarely fires
     # — but a human pushing to the sync branch would otherwise trip it.)
-    if: github.head_ref != 'sync/skills-pack'
+    #
+    # The branch name alone is not enough to identify it: a fork can name its branch
+    # `sync/skills-pack` too, and would then skip the advisory it most needs. So the
+    # exemption also requires the branch to live in this repository.
+    if: >-
+      github.event.pull_request.head.repo.full_name != github.repository
+      || github.head_ref != 'sync/skills-pack'
     runs-on: ubuntu-latest
     steps:
       - name: Build the review body

@@ -43,6 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # Pin to the default branch. Without this, a `workflow_dispatch` from any
+          # other branch or tag would become the base of the sync branch, and the
+          # pull request to `main` would carry that branch's unrelated commits into
+          # the public pack.
+          ref: main
           fetch-depth: 0
 
       - name: Fetch the published manifest
@@ -64,16 +69,63 @@ jobs:
             exit 1
           fi
 
-          UPSTREAM=$(jq -r .content_digest upstream-index.json)
-          CURRENT=$(jq -r .content_digest index.json 2>/dev/null || echo "none")
-          echo "upstream=$UPSTREAM" | tee -a "$GITHUB_OUTPUT"
-          echo "current=$CURRENT"  | tee -a "$GITHUB_OUTPUT"
+          UPSTREAM=$(jq -r '.content_digest // ""' upstream-index.json)
+          # Validate before it reaches GITHUB_OUTPUT: a null, multiline or otherwise
+          # unexpected value would write extra records into that file.
+          if ! printf '%s' "$UPSTREAM" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::upstream manifest has no usable content_digest"
+            exit 1
+          fi
 
-          if [ "$UPSTREAM" = "$CURRENT" ]; then
-            echo "changed=false" | tee -a "$GITHUB_OUTPUT"
+          CURRENT=$(jq -r '.content_digest // "none"' index.json 2>/dev/null || echo "none")
+          {
+            echo "upstream=$UPSTREAM"
+            echo "current=$CURRENT"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM" != "$CURRENT" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Matching digests are necessary but not sufficient. The digest lives in a
+          # committed file, so a hand edit to skills/ leaves it untouched and the pack
+          # would stay broken indefinitely. Verify the tree against the per-file
+          # checksums in the manifest — that is what they are for — and repair if it
+          # has drifted.
+          if python3 - <<'PY'
+          import hashlib, json, pathlib, sys
+
+          manifest = json.load(open("index.json"))
+          expected = {
+              f"{s['name']}/{f['path']}": f["sha256"]
+              for s in manifest.get("skills", [])
+              for f in s.get("files", [])
+          }
+          root = pathlib.Path("skills")
+          present = {
+              str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()
+          } if root.is_dir() else set()
+
+          drift = sorted((present - set(expected)) | (set(expected) - present))
+          for path, digest in expected.items():
+              target = root / path
+              if target.is_file():
+                  if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                      drift.append(path)
+
+          for path in sorted(set(drift))[:20]:
+              print(f"drifted: {path}", file=sys.stderr)
+          sys.exit(1 if drift else 0)
+          PY
+          then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Pack is current ($CURRENT) — nothing to do." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "changed=true" | tee -a "$GITHUB_OUTPUT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::digest matches but skills/ has drifted — repairing"
+            echo "Digest matched but \`skills/\` had drifted; repairing." \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Download and unpack
