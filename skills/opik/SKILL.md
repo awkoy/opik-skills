@@ -143,5 +143,3 @@ def run(question: str) -> str:
 | Evaluation datasets & test suites (reference) | `references/evaluation-datasets.md`, `references/evaluation-test-suites.md` |
 
 To build and run an evaluation, use the `evaluate` skill. For repo instrumentation and config, use the `instrument` skill.
-
-<!-- hand-edited, should be reverted by the sync -->
