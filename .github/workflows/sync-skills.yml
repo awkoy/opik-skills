@@ -12,16 +12,6 @@ name: Sync skills from opik-mcp
 # credentials for this repository, and the token below is scoped to this one.
 
 on:
-  # The schedule stays commented out until the first cutover has been run by hand
-  # and reviewed (OPIK-7621, ticket 07). Until then this workflow is inert: it can
-  # only be started deliberately from the Actions tab.
-  #
-  # Uncomment after the first sync has been merged.
-  #
-  # schedule:
-  #   # Daily. Skill content changes weekly at most, and at pull-request
-  #   # granularity a tighter schedule only produces noise.
-  #   - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -167,7 +157,12 @@ jobs:
           git commit -m "sync: skills pack from ${SOURCE_REPO} (${UPSTREAM:0:12})"
           git push --force origin "$SYNC_BRANCH"
 
-          if ! gh pr view "$SYNC_BRANCH" --json number >/dev/null 2>&1; then
+          # `gh pr view <branch>` matches by branch name regardless of state, so it
+          # finds the *merged* pull request from the previous sync and concludes one
+          # already exists. Every sync after the first would then push the branch and
+          # open nothing — the silent staleness this workflow exists to prevent. Ask
+          # specifically for an open one.
+          if [ -z "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')" ]; then
             gh pr create \
               --base main --head "$SYNC_BRANCH" \
               --title "Sync skills pack from opik-mcp" \
